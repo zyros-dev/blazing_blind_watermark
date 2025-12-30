@@ -1,4 +1,4 @@
-FROM rust:1.85-bookworm
+FROM rust:1.87-bookworm
 
 # Install Python and OpenCV dependencies
 RUN apt-get update && apt-get install -y \
