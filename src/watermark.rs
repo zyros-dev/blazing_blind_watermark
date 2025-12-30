@@ -12,18 +12,25 @@ pub struct WaterMark {
     core: WaterMarkCore,
     wm_bit: Vec<bool>,
     img: Option<Array3<u8>>,
+    /// If set, images are resized to this max dimension before embedding/extracting.
+    /// This enables fast mode with consistent extraction regardless of input size.
+    embed_size: Option<u32>,
+    /// Original image dimensions, stored for upscaling after embed
+    original_size: Option<(u32, u32)>,
 }
 
 #[pymethods]
 impl WaterMark {
     #[new]
-    #[pyo3(signature = (password_wm=1, password_img=1))]
-    fn new(password_wm: u64, password_img: u64) -> Self {
+    #[pyo3(signature = (password_wm=1, password_img=1, embed_size=None))]
+    fn new(password_wm: u64, password_img: u64, embed_size: Option<u32>) -> Self {
         Self {
             password_wm,
             core: WaterMarkCore::new(password_img),
             wm_bit: Vec::new(),
             img: None,
+            embed_size,
+            original_size: None,
         }
     }
 
@@ -43,6 +50,14 @@ impl WaterMark {
             arr[[y as usize, x as usize, 2]] = pixel[0]; // R
         }
 
+        // Store original size and resize if embed_size is set
+        self.original_size = Some((w, h));
+        let arr = if let Some(max_dim) = self.embed_size {
+            resize_array(&arr, max_dim)
+        } else {
+            arr
+        };
+
         self.core.read_img_arr(&arr);
         self.img = Some(arr);
         Ok(())
@@ -61,6 +76,14 @@ impl WaterMark {
                 }
             }
         }
+
+        // Store original size (w, h) and resize if embed_size is set
+        self.original_size = Some((shape[1] as u32, shape[0] as u32));
+        let owned = if let Some(max_dim) = self.embed_size {
+            resize_array(&owned, max_dim)
+        } else {
+            owned
+        };
 
         self.core.read_img_arr(&owned);
         self.img = Some(owned);
@@ -133,6 +156,17 @@ impl WaterMark {
 
         let result = self.core.embed(&self.wm_bit);
 
+        // Upscale back to original size if embed_size was used
+        let result = if self.embed_size.is_some() {
+            if let Some((orig_w, orig_h)) = self.original_size {
+                resize_array_to(&result, orig_w, orig_h)
+            } else {
+                result
+            }
+        } else {
+            result
+        };
+
         if let Some(path) = filename {
             save_image(&result, path)?;
         }
@@ -172,6 +206,13 @@ impl WaterMark {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "Either filename or embed_img must be provided",
             ));
+        };
+
+        // Downscale to embed_size if set
+        let img = if let Some(max_dim) = self.embed_size {
+            resize_array(&img, max_dim)
+        } else {
+            img
         };
 
         let (wm_size, wm_dims) = parse_wm_shape(wm_shape)?;
@@ -309,4 +350,56 @@ fn parse_wm_shape(wm_shape: Option<&Bound<'_, PyAny>>) -> PyResult<(usize, Optio
             ))
         }
     }
+}
+
+/// Resize array so the longest dimension equals max_dim, preserving aspect ratio
+fn resize_array(arr: &Array3<u8>, max_dim: u32) -> Array3<u8> {
+    let (h, w, _) = arr.dim();
+    let (h, w) = (h as u32, w as u32);
+
+    // Calculate new dimensions preserving aspect ratio
+    let (new_w, new_h) = if w >= h {
+        let new_w = max_dim;
+        let new_h = (h as f64 * max_dim as f64 / w as f64).round() as u32;
+        (new_w, new_h.max(1))
+    } else {
+        let new_h = max_dim;
+        let new_w = (w as f64 * max_dim as f64 / h as f64).round() as u32;
+        (new_w.max(1), new_h)
+    };
+
+    resize_array_to(arr, new_w, new_h)
+}
+
+/// Resize array to exact dimensions using SIMD-optimized fast_image_resize
+fn resize_array_to(arr: &Array3<u8>, new_w: u32, new_h: u32) -> Array3<u8> {
+    use fast_image_resize as fir;
+
+    let (h, w, c) = arr.dim();
+
+    if new_w == w as u32 && new_h == h as u32 {
+        return arr.clone();
+    }
+
+    // Get contiguous slice of source data (already in BGR order, but fir doesn't care)
+    let src_data: Vec<u8> = arr.iter().cloned().collect();
+
+    let src_image = fir::images::Image::from_vec_u8(
+        w as u32,
+        h as u32,
+        src_data,
+        fir::PixelType::U8x3,
+    )
+    .unwrap();
+
+    let mut dst_image = fir::images::Image::new(new_w, new_h, fir::PixelType::U8x3);
+
+    let mut resizer = fir::Resizer::new();
+    resizer
+        .resize(&src_image, &mut dst_image, None)
+        .unwrap();
+
+    // Convert back to Array3
+    let dst_data = dst_image.into_vec();
+    Array3::from_shape_vec((new_h as usize, new_w as usize, c), dst_data).unwrap()
 }
