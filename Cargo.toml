@@ -1,0 +1,22 @@
+[package]
+name = "blazing_blind_watermark"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "blazing_blind_watermark"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+numpy = "0.22"
+ndarray = "0.16"
+image = "0.25"
+rayon = "1.10"
+rand = "0.8"
+faer = "0.20"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
