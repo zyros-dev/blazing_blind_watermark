@@ -1,5 +1,6 @@
 from blazing_blind_watermark._lib import (
     WaterMark,
+    RECOMMENDED_EMBED_SIZE,
     cut_att3,
     resize_att,
     bright_att,
@@ -46,6 +47,7 @@ bw_notes._show()
 
 __all__ = [
     "WaterMark",
+    "RECOMMENDED_EMBED_SIZE",
     "cut_att3",
     "resize_att",
     "bright_att",

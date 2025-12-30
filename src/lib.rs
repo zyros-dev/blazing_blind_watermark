@@ -10,8 +10,12 @@ mod watermark;
 
 use pyo3::prelude::*;
 
+/// Recommended embed_size for fast mode. Balances speed and quality.
+const RECOMMENDED_EMBED_SIZE: u32 = 1536;
+
 #[pymodule]
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("RECOMMENDED_EMBED_SIZE", RECOMMENDED_EMBED_SIZE)?;
     m.add_class::<watermark::WaterMark>()?;
 
     // Attack functions

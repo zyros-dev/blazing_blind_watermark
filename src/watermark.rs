@@ -15,8 +15,8 @@ pub struct WaterMark {
     /// If set, images are resized to this max dimension before embedding/extracting.
     /// This enables fast mode with consistent extraction regardless of input size.
     embed_size: Option<u32>,
-    /// Original image dimensions, stored for upscaling after embed
-    original_size: Option<(u32, u32)>,
+    /// Original full-resolution image, stored for delta-based embedding
+    original_img: Option<Array3<u8>>,
 }
 
 #[pymethods]
@@ -30,7 +30,7 @@ impl WaterMark {
             wm_bit: Vec::new(),
             img: None,
             embed_size,
-            original_size: None,
+            original_img: None,
         }
     }
 
@@ -50,16 +50,16 @@ impl WaterMark {
             arr[[y as usize, x as usize, 2]] = pixel[0]; // R
         }
 
-        // Store original size and resize if embed_size is set
-        self.original_size = Some((w, h));
-        let arr = if let Some(max_dim) = self.embed_size {
+        // Store original and resize if embed_size is set
+        let working_img = if let Some(max_dim) = self.embed_size {
+            self.original_img = Some(arr.clone());
             resize_array(&arr, max_dim)
         } else {
             arr
         };
 
-        self.core.read_img_arr(&arr);
-        self.img = Some(arr);
+        self.core.read_img_arr(&working_img);
+        self.img = Some(working_img);
         Ok(())
     }
 
@@ -77,16 +77,16 @@ impl WaterMark {
             }
         }
 
-        // Store original size (w, h) and resize if embed_size is set
-        self.original_size = Some((shape[1] as u32, shape[0] as u32));
-        let owned = if let Some(max_dim) = self.embed_size {
+        // Store original and resize if embed_size is set
+        let working_img = if let Some(max_dim) = self.embed_size {
+            self.original_img = Some(owned.clone());
             resize_array(&owned, max_dim)
         } else {
             owned
         };
 
-        self.core.read_img_arr(&owned);
-        self.img = Some(owned);
+        self.core.read_img_arr(&working_img);
+        self.img = Some(working_img);
         Ok(())
     }
 
@@ -154,17 +154,18 @@ impl WaterMark {
             ));
         }
 
-        let result = self.core.embed(&self.wm_bit);
+        let watermarked_small = self.core.embed(&self.wm_bit);
 
-        // Upscale back to original size if embed_size was used
+        // Apply delta-based upscaling if embed_size was used
         let result = if self.embed_size.is_some() {
-            if let Some((orig_w, orig_h)) = self.original_size {
-                resize_array_to(&result, orig_w, orig_h)
+            if let Some(ref original) = self.original_img {
+                let original_small = self.img.as_ref().unwrap();
+                apply_watermark_delta(original, original_small, &watermarked_small)
             } else {
-                result
+                watermarked_small
             }
         } else {
-            result
+            watermarked_small
         };
 
         if let Some(path) = filename {
@@ -402,4 +403,58 @@ fn resize_array_to(arr: &Array3<u8>, new_w: u32, new_h: u32) -> Array3<u8> {
     // Convert back to Array3
     let dst_data = dst_image.into_vec();
     Array3::from_shape_vec((new_h as usize, new_w as usize, c), dst_data).unwrap()
+}
+
+/// Apply watermark delta to preserve original image quality.
+/// Computes delta at small scale, upscales it, and applies to original.
+fn apply_watermark_delta(
+    original: &Array3<u8>,
+    original_small: &Array3<u8>,
+    watermarked_small: &Array3<u8>,
+) -> Array3<u8> {
+    use fast_image_resize as fir;
+
+    let (orig_h, orig_w, c) = original.dim();
+    let (small_h, small_w, _) = original_small.dim();
+
+    // Compute delta in i16 space to handle negative values
+    let delta_small: Vec<i16> = original_small
+        .iter()
+        .zip(watermarked_small.iter())
+        .map(|(&orig, &wm)| wm as i16 - orig as i16)
+        .collect();
+
+    // Upscale delta using bilinear interpolation
+    // We need to handle signed values, so we offset by 128, resize, then un-offset
+    let delta_offset: Vec<u8> = delta_small
+        .iter()
+        .map(|&d| (d + 128).clamp(0, 255) as u8)
+        .collect();
+
+    let src_image = fir::images::Image::from_vec_u8(
+        small_w as u32,
+        small_h as u32,
+        delta_offset,
+        fir::PixelType::U8x3,
+    )
+    .unwrap();
+
+    let mut dst_image = fir::images::Image::new(orig_w as u32, orig_h as u32, fir::PixelType::U8x3);
+
+    let mut resizer = fir::Resizer::new();
+    resizer.resize(&src_image, &mut dst_image, None).unwrap();
+
+    let delta_upscaled = dst_image.into_vec();
+
+    // Apply delta to original: result = clamp(original + (delta - 128), 0, 255)
+    let result_data: Vec<u8> = original
+        .iter()
+        .zip(delta_upscaled.iter())
+        .map(|(&orig, &delta_off)| {
+            let delta = delta_off as i16 - 128;
+            (orig as i16 + delta).clamp(0, 255) as u8
+        })
+        .collect();
+
+    Array3::from_shape_vec((orig_h, orig_w, c), result_data).unwrap()
 }
