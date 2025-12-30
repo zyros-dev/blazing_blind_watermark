@@ -1,7 +1,25 @@
 use ndarray::Array3;
-use pyo3::prelude::*;
-use pyo3::types::PyList;
+use rand_mt::Mt19937GenRand32;
 use rayon::prelude::*;
+
+/// Numpy-compatible random float generator (genrand_res53)
+fn numpy_random_f64(rng: &mut Mt19937GenRand32) -> f64 {
+    let a = (rng.next_u32() >> 5) as f64;
+    let b = (rng.next_u32() >> 6) as f64;
+    (a * 67108864.0 + b) * (1.0 / 9007199254740992.0)
+}
+
+/// Numpy-compatible bounded randint: returns value in [0, upper)
+fn numpy_randint(rng: &mut Mt19937GenRand32, upper: u32) -> u32 {
+    // Numpy uses rejection sampling to avoid modulo bias
+    let mask = upper.next_power_of_two() - 1;
+    loop {
+        let val = rng.next_u32() & mask;
+        if val < upper {
+            return val;
+        }
+    }
+}
 
 /// Convert BGR to YUV color space (parallelized by row)
 pub fn bgr_to_yuv(bgr: &Array3<f32>) -> Array3<f32> {
@@ -49,24 +67,26 @@ pub fn yuv_to_bgr(yuv: &Array3<f32>) -> Array3<f32> {
     Array3::from_shape_vec((h, w, 3), bgr_data).unwrap()
 }
 
-/// Generate shuffle indices for password-based encryption
-/// Calls numpy directly: np.random.RandomState(seed).random(size=(size, block_shape)).argsort(axis=1)
+/// Generate shuffle indices for password-based encryption (pure Rust)
+/// Matches: np.random.RandomState(seed).random(size=(size, block_shape)).argsort(axis=1)
 pub fn generate_shuffle_indices(seed: u64, size: usize, block_len: usize) -> Vec<Vec<usize>> {
-    Python::with_gil(|py| {
-        let np = py.import_bound("numpy").expect("numpy import failed");
-        let random = np.getattr("random").unwrap();
-        let rng = random.call_method1("RandomState", (seed as u32,)).unwrap();
-        let random_arr = rng.call_method1("random", ((size, block_len),)).unwrap();
-        let argsort = random_arr.call_method1("argsort", (1,)).unwrap();
+    let mut rng = Mt19937GenRand32::new(seed as u32);
+    let mut result = Vec::with_capacity(size);
 
-        let mut result = Vec::with_capacity(size);
-        for i in 0..size {
-            let row = argsort.get_item(i).unwrap();
-            let row_list: Vec<usize> = row.extract().unwrap();
-            result.push(row_list);
-        }
-        result
-    })
+    for _ in 0..size {
+        // Generate random values for this row
+        let mut row: Vec<(f64, usize)> = (0..block_len)
+            .map(|i| (numpy_random_f64(&mut rng), i))
+            .collect();
+
+        // Stable sort by random value (argsort)
+        row.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        // Extract indices
+        result.push(row.into_iter().map(|(_, i)| i).collect());
+    }
+
+    result
 }
 
 /// Shuffle a flat array according to indices
@@ -89,37 +109,39 @@ pub fn unshuffle_by_indices(shuffled: &[f32; 16], indices: &[usize]) -> [f32; 16
     data
 }
 
-/// Shuffle watermark bits using password (calls numpy's shuffle directly)
+/// Shuffle watermark bits using password (pure Rust, numpy-compatible)
+/// Matches: np.random.RandomState(password).shuffle(bits)
 pub fn shuffle_wm_bits(bits: &[bool], password: u64) -> Vec<bool> {
-    Python::with_gil(|py| {
-        let np = py.import_bound("numpy").expect("numpy import failed");
-        let random = np.getattr("random").unwrap();
-        let rng = random.call_method1("RandomState", (password as u32,)).unwrap();
-        let bits_list = PyList::new_bound(py, bits.iter().map(|&b| b));
-        let bits_arr = np.call_method1("array", (bits_list,)).unwrap();
-        rng.call_method1("shuffle", (&bits_arr,)).unwrap();
-        bits_arr.extract().unwrap()
-    })
+    let mut result = bits.to_vec();
+    let mut rng = Mt19937GenRand32::new(password as u32);
+
+    // Fisher-Yates shuffle (numpy goes from n-1 down to 1)
+    for i in (1..result.len()).rev() {
+        let j = numpy_randint(&mut rng, (i + 1) as u32) as usize;
+        result.swap(i, j);
+    }
+
+    result
 }
 
-/// Unshuffle watermark bits (for extraction)
-/// Uses numpy: shuffle an index array, then use it to reorder
+/// Unshuffle watermark bits (for extraction, pure Rust)
 pub fn unshuffle_wm_bits(shuffled: &[bool], password: u64, len: usize) -> Vec<bool> {
-    Python::with_gil(|py| {
-        let np = py.import_bound("numpy").expect("numpy import failed");
-        let random = np.getattr("random").unwrap();
-        let rng = random.call_method1("RandomState", (password as u32,)).unwrap();
-        let indices = np.call_method1("arange", (len,)).unwrap();
-        rng.call_method1("shuffle", (&indices,)).unwrap();
-        let wm_index: Vec<usize> = indices.extract().unwrap();
+    // Generate the same shuffle permutation
+    let mut indices: Vec<usize> = (0..len).collect();
+    let mut rng = Mt19937GenRand32::new(password as u32);
 
-        let mut result = vec![false; len];
-        for (i, &idx) in wm_index.iter().enumerate() {
-            result[idx] = shuffled[i];
-        }
+    for i in (1..len).rev() {
+        let j = numpy_randint(&mut rng, (i + 1) as u32) as usize;
+        indices.swap(i, j);
+    }
 
-        result
-    })
+    // Invert the permutation
+    let mut result = vec![false; len];
+    for (i, &idx) in indices.iter().enumerate() {
+        result[idx] = shuffled[i];
+    }
+
+    result
 }
 
 /// One-dimensional k-means clustering with 2 centers (for binary classification)

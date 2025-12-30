@@ -1,46 +1,40 @@
-use std::f32::consts::PI;
+// Precomputed DCT-II coefficients: cos(PI/N * (n + 0.5) * k) where N=4
+// DCT[k][n] for k=0..3, n=0..3
+const DCT: [[f32; 4]; 4] = [
+    [1.0, 1.0, 1.0, 1.0], // k=0: all cos(0) = 1
+    [0.9238795325, 0.3826834324, -0.3826834324, -0.9238795325], // k=1: cos(π/8), cos(3π/8), cos(5π/8), cos(7π/8)
+    [0.7071067812, -0.7071067812, -0.7071067812, 0.7071067812], // k=2: cos(π/4), cos(3π/4), cos(5π/4), cos(7π/4)
+    [0.3826834324, -0.9238795325, 0.9238795325, -0.3826834324], // k=3: cos(3π/8), cos(9π/8), cos(15π/8), cos(21π/8)
+];
 
-/// Get DCT coefficient - computed at runtime for accuracy
-/// cos(PI/N * (n + 0.5) * k) where N=4
+// Normalization constants
+const SCALE0: f32 = 0.5; // sqrt(1/4)
+const SCALE: f32 = 0.707106781; // sqrt(2/4) = sqrt(0.5)
+
+/// 1D DCT-II with precomputed coefficients
 #[inline]
-fn dct_coeff(k: usize, n: usize) -> f32 {
-    (PI / 4.0 * (n as f32 + 0.5) * k as f32).cos()
-}
-
-/// 1D DCT-II (scipy/opencv compatible)
 fn dct_1d(input: &[f32; 4]) -> [f32; 4] {
-    let mut output = [0.0f32; 4];
-    let scale = (2.0f32 / 4.0).sqrt();
-
-    for k in 0..4 {
-        let mut sum = 0.0f32;
-        for n in 0..4 {
-            sum += input[n] * dct_coeff(k, n);
-        }
-        // Apply normalization: sqrt(1/N) for k=0, sqrt(2/N) otherwise
-        output[k] = if k == 0 {
-            sum * (1.0f32 / 4.0).sqrt()
-        } else {
-            sum * scale
-        };
-    }
-    output
+    [
+        SCALE0 * (input[0] * DCT[0][0] + input[1] * DCT[0][1] + input[2] * DCT[0][2] + input[3] * DCT[0][3]),
+        SCALE * (input[0] * DCT[1][0] + input[1] * DCT[1][1] + input[2] * DCT[1][2] + input[3] * DCT[1][3]),
+        SCALE * (input[0] * DCT[2][0] + input[1] * DCT[2][1] + input[2] * DCT[2][2] + input[3] * DCT[2][3]),
+        SCALE * (input[0] * DCT[3][0] + input[1] * DCT[3][1] + input[2] * DCT[3][2] + input[3] * DCT[3][3]),
+    ]
 }
 
-/// 1D IDCT (inverse) - orthonormal
+/// 1D IDCT with precomputed coefficients
+#[inline]
 fn idct_1d(input: &[f32; 4]) -> [f32; 4] {
-    let mut output = [0.0f32; 4];
-    let scale0 = (1.0f32 / 4.0).sqrt();
-    let scale = (2.0f32 / 4.0).sqrt();
-
-    for n in 0..4 {
-        let mut sum = input[0] * scale0 * dct_coeff(0, n); // k=0 term (cos(0) = 1)
-        for k in 1..4 {
-            sum += input[k] * scale * dct_coeff(k, n);
-        }
-        output[n] = sum;
-    }
-    output
+    let s0 = input[0] * SCALE0;
+    let s1 = input[1] * SCALE;
+    let s2 = input[2] * SCALE;
+    let s3 = input[3] * SCALE;
+    [
+        s0 * DCT[0][0] + s1 * DCT[1][0] + s2 * DCT[2][0] + s3 * DCT[3][0],
+        s0 * DCT[0][1] + s1 * DCT[1][1] + s2 * DCT[2][1] + s3 * DCT[3][1],
+        s0 * DCT[0][2] + s1 * DCT[1][2] + s2 * DCT[2][2] + s3 * DCT[3][2],
+        s0 * DCT[0][3] + s1 * DCT[1][3] + s2 * DCT[2][3] + s3 * DCT[3][3],
+    ]
 }
 
 /// 2D DCT-II for a 4x4 block (scipy compatible)
