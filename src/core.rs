@@ -41,20 +41,13 @@ impl WaterMarkCore {
         let (h, w, c) = img.dim();
 
         self.alpha = if c == 4 {
-            Some(img.slice(s![.., .., 3]).mapv(|x| x).to_owned())
+            Some(img.slice(s![.., .., 3]).to_owned())
         } else {
             None
         };
 
-        let channels = c.min(3);
-        let mut img_f32 = Array3::<f32>::zeros((h, w, 3));
-        for i in 0..h {
-            for j in 0..w {
-                for k in 0..channels {
-                    img_f32[[i, j, k]] = img[[i, j, k]] as f32;
-                }
-            }
-        }
+        // Convert u8 to f32 using vectorized operation
+        let img_f32 = img.slice(s![.., .., ..3]).mapv(|x| x as f32);
 
         self.img_shape = Some((h, w));
 

@@ -1,47 +1,52 @@
 use ndarray::Array3;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
+use rayon::prelude::*;
 
-/// Convert BGR to YUV color space
+/// Convert BGR to YUV color space (parallelized by row)
 pub fn bgr_to_yuv(bgr: &Array3<f32>) -> Array3<f32> {
     let (h, w, _) = bgr.dim();
-    let mut yuv = Array3::<f32>::zeros((h, w, 3));
+    let mut yuv_data = vec![0.0f32; h * w * 3];
 
-    for i in 0..h {
-        for j in 0..w {
-            let b = bgr[[i, j, 0]];
-            let g = bgr[[i, j, 1]];
-            let r = bgr[[i, j, 2]];
+    yuv_data
+        .par_chunks_mut(w * 3)
+        .enumerate()
+        .for_each(|(i, yuv_row)| {
+            for j in 0..w {
+                let b = bgr[[i, j, 0]];
+                let g = bgr[[i, j, 1]];
+                let r = bgr[[i, j, 2]];
 
-            // BT.601 conversion
-            yuv[[i, j, 0]] = 0.299 * r + 0.587 * g + 0.114 * b;
-            yuv[[i, j, 1]] = -0.14713 * r - 0.28886 * g + 0.436 * b + 128.0;
-            yuv[[i, j, 2]] = 0.615 * r - 0.51499 * g - 0.10001 * b + 128.0;
-        }
-    }
+                yuv_row[j * 3] = 0.299 * r + 0.587 * g + 0.114 * b;
+                yuv_row[j * 3 + 1] = -0.14713 * r - 0.28886 * g + 0.436 * b + 128.0;
+                yuv_row[j * 3 + 2] = 0.615 * r - 0.51499 * g - 0.10001 * b + 128.0;
+            }
+        });
 
-    yuv
+    Array3::from_shape_vec((h, w, 3), yuv_data).unwrap()
 }
 
-/// Convert YUV to BGR color space
+/// Convert YUV to BGR color space (parallelized by row)
 pub fn yuv_to_bgr(yuv: &Array3<f32>) -> Array3<f32> {
     let (h, w, _) = yuv.dim();
-    let mut bgr = Array3::<f32>::zeros((h, w, 3));
+    let mut bgr_data = vec![0.0f32; h * w * 3];
 
-    for i in 0..h {
-        for j in 0..w {
-            let y = yuv[[i, j, 0]];
-            let u = yuv[[i, j, 1]] - 128.0;
-            let v = yuv[[i, j, 2]] - 128.0;
+    bgr_data
+        .par_chunks_mut(w * 3)
+        .enumerate()
+        .for_each(|(i, bgr_row)| {
+            for j in 0..w {
+                let y = yuv[[i, j, 0]];
+                let u = yuv[[i, j, 1]] - 128.0;
+                let v = yuv[[i, j, 2]] - 128.0;
 
-            // BT.601 inverse
-            bgr[[i, j, 2]] = y + 1.13983 * v; // R
-            bgr[[i, j, 1]] = y - 0.39465 * u - 0.58060 * v; // G
-            bgr[[i, j, 0]] = y + 2.03211 * u; // B
-        }
-    }
+                bgr_row[j * 3] = y + 2.03211 * u; // B
+                bgr_row[j * 3 + 1] = y - 0.39465 * u - 0.58060 * v; // G
+                bgr_row[j * 3 + 2] = y + 1.13983 * v; // R
+            }
+        });
 
-    bgr
+    Array3::from_shape_vec((h, w, 3), bgr_data).unwrap()
 }
 
 /// Generate shuffle indices for password-based encryption
