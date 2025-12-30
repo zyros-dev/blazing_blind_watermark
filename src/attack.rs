@@ -1,7 +1,7 @@
-use image::{ImageBuffer, Rgb};
 use ndarray::Array3;
 use numpy::{PyArray3, PyReadonlyArray3, ToPyArray};
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 use rand::prelude::*;
 
 /// Crop and scale attack
@@ -15,24 +15,30 @@ pub fn cut_att3<'py>(
     loc: Option<(usize, usize, usize, usize)>,
     scale: Option<f32>,
 ) -> PyResult<Bound<'py, PyArray3<u8>>> {
-    let img = load_input(input_filename, input_img)?;
-    let (h, w, c) = img.dim();
+    let cv2 = py.import_bound("cv2")?;
+
+    let img = load_input_cv2(py, input_filename, input_img)?;
+    let shape = img.getattr("shape")?;
+    let shape_tuple: (usize, usize, usize) = shape.extract()?;
+    let (h, w, _c) = shape_tuple;
+
     let (x1, y1, x2, y2) = loc.unwrap_or((0, 0, w, h));
 
-    let crop_h = y2 - y1;
-    let crop_w = x2 - x1;
-    let mut cropped = Array3::<u8>::zeros((crop_h, crop_w, c));
-    for i in 0..crop_h {
-        for j in 0..crop_w {
-            for k in 0..c {
-                cropped[[i, j, k]] = img[[y1 + i, x1 + j, k]];
-            }
-        }
-    }
+    // Crop using numpy slicing via Python builtins
+    let builtins = py.import_bound("builtins")?;
+    let slice_fn = builtins.getattr("slice")?;
+    let row_slice = slice_fn.call1((y1, y2))?;
+    let col_slice = slice_fn.call1((x1, x2))?;
+    let cropped = img.get_item((row_slice, col_slice))?;
 
     let output = if let Some(s) = scale {
         if (s - 1.0).abs() > 0.001 {
-            resize_array(&cropped, (crop_h as f32 * s) as usize, (crop_w as f32 * s) as usize)
+            let crop_h = y2 - y1;
+            let crop_w = x2 - x1;
+            let new_h = (crop_h as f32 * s) as i32;
+            let new_w = (crop_w as f32 * s) as i32;
+            let dsize = PyTuple::new_bound(py, [new_w, new_h]);
+            cv2.call_method("resize", (&cropped, dsize), None)?
         } else {
             cropped
         }
@@ -41,13 +47,18 @@ pub fn cut_att3<'py>(
     };
 
     if let Some(path) = output_file_name {
-        save_array(&output, path)?;
+        cv2.call_method("imwrite", (path, &output), None)?;
     }
 
-    Ok(output.to_pyarray_bound(py).to_owned())
+    // Convert to numpy array and return
+    let np = py.import_bound("numpy")?;
+    let result = np.call_method("ascontiguousarray", (&output,), None)?;
+    let arr: PyReadonlyArray3<u8> = result.extract()?;
+    let owned = arr_to_owned(&arr);
+    Ok(owned.to_pyarray_bound(py).to_owned())
 }
 
-/// Resize attack
+/// Resize attack - uses cv2.resize for exact compatibility
 #[pyfunction]
 #[pyo3(signature = (input_filename=None, input_img=None, output_file_name=None, out_shape=(500, 500)))]
 pub fn resize_att<'py>(
@@ -57,15 +68,21 @@ pub fn resize_att<'py>(
     output_file_name: Option<&str>,
     out_shape: (usize, usize),
 ) -> PyResult<Bound<'py, PyArray3<u8>>> {
-    let img = load_input(input_filename, input_img)?;
+    let cv2 = py.import_bound("cv2")?;
 
-    let output = resize_array(&img, out_shape.1, out_shape.0); // Note: OpenCV uses (w, h)
+    let img = load_input_cv2(py, input_filename, input_img)?;
+    let dsize = PyTuple::new_bound(py, [out_shape.0 as i32, out_shape.1 as i32]);
+    let resized = cv2.call_method("resize", (&img, dsize), None)?;
 
     if let Some(path) = output_file_name {
-        save_array(&output, path)?;
+        cv2.call_method("imwrite", (path, &resized), None)?;
     }
 
-    Ok(output.to_pyarray_bound(py).to_owned())
+    let np = py.import_bound("numpy")?;
+    let result = np.call_method("ascontiguousarray", (&resized,), None)?;
+    let arr: PyReadonlyArray3<u8> = result.extract()?;
+    let owned = arr_to_owned(&arr);
+    Ok(owned.to_pyarray_bound(py).to_owned())
 }
 
 /// Brightness attack
@@ -78,24 +95,24 @@ pub fn bright_att<'py>(
     output_file_name: Option<&str>,
     ratio: f32,
 ) -> PyResult<Bound<'py, PyArray3<u8>>> {
-    let img = load_input(input_filename, input_img)?;
-    let (h, w, c) = img.dim();
+    let cv2 = py.import_bound("cv2")?;
+    let np = py.import_bound("numpy")?;
 
-    let mut output = Array3::<u8>::zeros((h, w, c));
-    for i in 0..h {
-        for j in 0..w {
-            for k in 0..c {
-                let val = (img[[i, j, k]] as f32 * ratio).min(255.0);
-                output[[i, j, k]] = val as u8;
-            }
-        }
-    }
+    let img = load_input_cv2(py, input_filename, input_img)?;
+
+    // Match Python: (img * ratio).clip(0, 255).astype(np.uint8)
+    let scaled = img.call_method("__mul__", (ratio,), None)?;
+    let clipped = np.call_method("clip", (&scaled, 0, 255), None)?;
+    let output = clipped.call_method("astype", (np.getattr("uint8")?,), None)?;
 
     if let Some(path) = output_file_name {
-        save_array(&output, path)?;
+        cv2.call_method("imwrite", (path, &output), None)?;
     }
 
-    Ok(output.to_pyarray_bound(py).to_owned())
+    let result = np.call_method("ascontiguousarray", (&output,), None)?;
+    let arr: PyReadonlyArray3<u8> = result.extract()?;
+    let owned = arr_to_owned(&arr);
+    Ok(owned.to_pyarray_bound(py).to_owned())
 }
 
 /// Shelter (occlusion) attack
@@ -109,11 +126,19 @@ pub fn shelter_att<'py>(
     ratio: f32,
     n: usize,
 ) -> PyResult<Bound<'py, PyArray3<u8>>> {
-    let img = load_input(input_filename, input_img)?;
-    let (h, w, c) = img.dim();
+    let cv2 = py.import_bound("cv2")?;
+    let np = py.import_bound("numpy")?;
 
-    let mut output = img.clone();
+    let img = load_input_cv2(py, input_filename, input_img)?;
+    let output = img.call_method("copy", (), None)?;
+
+    let shape = output.getattr("shape")?;
+    let shape_tuple: (usize, usize, usize) = shape.extract()?;
+    let (h, w, _c) = shape_tuple;
+
     let mut rng = rand::thread_rng();
+    let builtins = py.import_bound("builtins")?;
+    let slice_fn = builtins.getattr("slice")?;
 
     for _ in 0..n {
         let tmp_h = rng.gen::<f32>() * (1.0 - ratio);
@@ -124,20 +149,20 @@ pub fn shelter_att<'py>(
         let start_w = (tmp_w * w as f32) as usize;
         let end_w = ((tmp_w + ratio) * w as f32) as usize;
 
-        for i in start_h..end_h.min(h) {
-            for j in start_w..end_w.min(w) {
-                for k in 0..c {
-                    output[[i, j, k]] = 255;
-                }
-            }
-        }
+        // Set region to white
+        let row_slice = slice_fn.call1((start_h, end_h.min(h)))?;
+        let col_slice = slice_fn.call1((start_w, end_w.min(w)))?;
+        output.set_item((row_slice, col_slice), 255u8)?;
     }
 
     if let Some(path) = output_file_name {
-        save_array(&output, path)?;
+        cv2.call_method("imwrite", (path, &output), None)?;
     }
 
-    Ok(output.to_pyarray_bound(py).to_owned())
+    let result = np.call_method("ascontiguousarray", (&output,), None)?;
+    let arr: PyReadonlyArray3<u8> = result.extract()?;
+    let owned = arr_to_owned(&arr);
+    Ok(owned.to_pyarray_bound(py).to_owned())
 }
 
 /// Salt and pepper noise attack
@@ -150,30 +175,38 @@ pub fn salt_pepper_att<'py>(
     output_file_name: Option<&str>,
     ratio: f32,
 ) -> PyResult<Bound<'py, PyArray3<u8>>> {
-    let img = load_input(input_filename, input_img)?;
-    let (h, w, c) = img.dim();
+    let cv2 = py.import_bound("cv2")?;
+    let np = py.import_bound("numpy")?;
 
-    let mut output = img.clone();
+    let img = load_input_cv2(py, input_filename, input_img)?;
+    let output = img.call_method("copy", (), None)?;
+
+    let shape = output.getattr("shape")?;
+    let shape_tuple: (usize, usize, usize) = shape.extract()?;
+    let (h, w, _c) = shape_tuple;
+
     let mut rng = rand::thread_rng();
 
     for i in 0..h {
         for j in 0..w {
             if rng.gen::<f32>() < ratio {
-                for k in 0..c {
-                    output[[i, j, k]] = 255;
-                }
+                let idx = PyTuple::new_bound(py, [i, j]);
+                output.set_item(idx, 255u8)?;
             }
         }
     }
 
     if let Some(path) = output_file_name {
-        save_array(&output, path)?;
+        cv2.call_method("imwrite", (path, &output), None)?;
     }
 
-    Ok(output.to_pyarray_bound(py).to_owned())
+    let result = np.call_method("ascontiguousarray", (&output,), None)?;
+    let arr: PyReadonlyArray3<u8> = result.extract()?;
+    let owned = arr_to_owned(&arr);
+    Ok(owned.to_pyarray_bound(py).to_owned())
 }
 
-/// Rotation attack
+/// Rotation attack - uses cv2.warpAffine for exact compatibility
 #[pyfunction]
 #[pyo3(signature = (input_filename=None, input_img=None, output_file_name=None, angle=45.0))]
 pub fn rot_att<'py>(
@@ -183,86 +216,49 @@ pub fn rot_att<'py>(
     output_file_name: Option<&str>,
     angle: f32,
 ) -> PyResult<Bound<'py, PyArray3<u8>>> {
-    let img = load_input(input_filename, input_img)?;
-    let (h, w, c) = img.dim();
+    let cv2 = py.import_bound("cv2")?;
+    let np = py.import_bound("numpy")?;
 
-    let cx = w as f32 / 2.0;
-    let cy = h as f32 / 2.0;
-    let rad = angle.to_radians();
-    let cos_a = rad.cos();
-    let sin_a = rad.sin();
+    let img = load_input_cv2(py, input_filename, input_img)?;
 
-    let mut output = Array3::<u8>::zeros((h, w, c));
+    let shape = img.getattr("shape")?;
+    let shape_tuple: (usize, usize, usize) = shape.extract()?;
+    let (rows, cols, _c) = shape_tuple;
 
-    for i in 0..h {
-        for j in 0..w {
-            // Rotate around center
-            let x = j as f32 - cx;
-            let y = i as f32 - cy;
+    let center = PyTuple::new_bound(py, [cols as f32 / 2.0, rows as f32 / 2.0]);
+    let rot_mat = cv2.call_method("getRotationMatrix2D", (center, angle, 1.0), None)?;
 
-            let src_x = x * cos_a + y * sin_a + cx;
-            let src_y = -x * sin_a + y * cos_a + cy;
-
-            if src_x >= 0.0 && src_x < w as f32 - 1.0 && src_y >= 0.0 && src_y < h as f32 - 1.0 {
-                // Bilinear interpolation
-                let x0 = src_x.floor() as usize;
-                let y0 = src_y.floor() as usize;
-                let x1 = x0 + 1;
-                let y1 = y0 + 1;
-                let xf = src_x - x0 as f32;
-                let yf = src_y - y0 as f32;
-
-                for k in 0..c {
-                    let v00 = img[[y0, x0, k]] as f32;
-                    let v01 = img[[y0, x1, k]] as f32;
-                    let v10 = img[[y1, x0, k]] as f32;
-                    let v11 = img[[y1, x1, k]] as f32;
-
-                    let val = v00 * (1.0 - xf) * (1.0 - yf)
-                        + v01 * xf * (1.0 - yf)
-                        + v10 * (1.0 - xf) * yf
-                        + v11 * xf * yf;
-
-                    output[[i, j, k]] = val.clamp(0.0, 255.0) as u8;
-                }
-            }
-        }
-    }
+    let dsize = PyTuple::new_bound(py, [cols as i32, rows as i32]);
+    let rotated = cv2.call_method("warpAffine", (&img, &rot_mat, dsize), None)?;
 
     if let Some(path) = output_file_name {
-        save_array(&output, path)?;
+        cv2.call_method("imwrite", (path, &rotated), None)?;
     }
 
-    Ok(output.to_pyarray_bound(py).to_owned())
+    let result = np.call_method("ascontiguousarray", (&rotated,), None)?;
+    let arr: PyReadonlyArray3<u8> = result.extract()?;
+    let owned = arr_to_owned(&arr);
+    Ok(owned.to_pyarray_bound(py).to_owned())
 }
 
-fn load_input(filename: Option<&str>, img: Option<PyReadonlyArray3<u8>>) -> PyResult<Array3<u8>> {
-    if let Some(path) = filename {
-        let dyn_img = image::open(path)
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let rgb = dyn_img.to_rgb8();
-        let (w, h) = rgb.dimensions();
+fn load_input_cv2<'py>(
+    py: Python<'py>,
+    filename: Option<&str>,
+    img: Option<PyReadonlyArray3<u8>>,
+) -> PyResult<Bound<'py, pyo3::PyAny>> {
+    let cv2 = py.import_bound("cv2")?;
+    let np = py.import_bound("numpy")?;
 
-        let mut arr = Array3::<u8>::zeros((h as usize, w as usize, 3));
-        for (x, y, pixel) in rgb.enumerate_pixels() {
-            // RGB to BGR
-            arr[[y as usize, x as usize, 0]] = pixel[2];
-            arr[[y as usize, x as usize, 1]] = pixel[1];
-            arr[[y as usize, x as usize, 2]] = pixel[0];
-        }
-        Ok(arr)
+    if let Some(path) = filename {
+        let result = cv2.call_method("imread", (path,), None)?;
+        Ok(result)
     } else if let Some(arr) = img {
-        let a = arr.as_array();
-        let shape = a.shape();
-        let mut owned = Array3::<u8>::zeros((shape[0], shape[1], shape[2]));
-        for i in 0..shape[0] {
-            for j in 0..shape[1] {
-                for k in 0..shape[2] {
-                    owned[[i, j, k]] = a[[i, j, k]];
-                }
-            }
-        }
-        Ok(owned)
+        // Convert to contiguous array
+        let py_arr = arr.as_array();
+        let owned = arr_to_owned_from_view(&py_arr);
+        let np_arr = owned.to_pyarray_bound(py);
+        let result = np.call_method("ascontiguousarray", (&np_arr,), None)?;
+        Ok(result)
     } else {
         Err(pyo3::exceptions::PyValueError::new_err(
             "Either input_filename or input_img must be provided",
@@ -270,60 +266,20 @@ fn load_input(filename: Option<&str>, img: Option<PyReadonlyArray3<u8>>) -> PyRe
     }
 }
 
-fn resize_array(img: &Array3<u8>, new_h: usize, new_w: usize) -> Array3<u8> {
-    let (h, w, c) = img.dim();
-    let mut output = Array3::<u8>::zeros((new_h, new_w, c));
+fn arr_to_owned(arr: &PyReadonlyArray3<u8>) -> Array3<u8> {
+    let a = arr.as_array();
+    arr_to_owned_from_view(&a)
+}
 
-    let scale_y = h as f32 / new_h as f32;
-    let scale_x = w as f32 / new_w as f32;
-
-    for i in 0..new_h {
-        for j in 0..new_w {
-            let src_y = (i as f32 * scale_y).min((h - 1) as f32);
-            let src_x = (j as f32 * scale_x).min((w - 1) as f32);
-
-            let y0 = src_y.floor() as usize;
-            let x0 = src_x.floor() as usize;
-            let y1 = (y0 + 1).min(h - 1);
-            let x1 = (x0 + 1).min(w - 1);
-            let yf = src_y - y0 as f32;
-            let xf = src_x - x0 as f32;
-
-            for k in 0..c {
-                let v00 = img[[y0, x0, k]] as f32;
-                let v01 = img[[y0, x1, k]] as f32;
-                let v10 = img[[y1, x0, k]] as f32;
-                let v11 = img[[y1, x1, k]] as f32;
-
-                let val = v00 * (1.0 - xf) * (1.0 - yf)
-                    + v01 * xf * (1.0 - yf)
-                    + v10 * (1.0 - xf) * yf
-                    + v11 * xf * yf;
-
-                output[[i, j, k]] = val.clamp(0.0, 255.0) as u8;
+fn arr_to_owned_from_view(a: &ndarray::ArrayView3<u8>) -> Array3<u8> {
+    let shape = a.shape();
+    let mut owned = Array3::<u8>::zeros((shape[0], shape[1], shape[2]));
+    for i in 0..shape[0] {
+        for j in 0..shape[1] {
+            for k in 0..shape[2] {
+                owned[[i, j, k]] = a[[i, j, k]];
             }
         }
     }
-
-    output
-}
-
-fn save_array(arr: &Array3<u8>, path: &str) -> PyResult<()> {
-    let (h, w, _c) = arr.dim();
-    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(w as u32, h as u32);
-
-    for y in 0..h {
-        for x in 0..w {
-            // BGR to RGB
-            img.put_pixel(
-                x as u32,
-                y as u32,
-                Rgb([arr[[y, x, 2]], arr[[y, x, 1]], arr[[y, x, 0]]]),
-            );
-        }
-    }
-
-    img.save(path)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-    Ok(())
+    owned
 }
