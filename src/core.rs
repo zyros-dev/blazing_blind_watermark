@@ -257,10 +257,6 @@ impl WaterMarkCore {
         let wm_avg = self.extract(img, wm_size);
         one_dim_kmeans(&wm_avg)
     }
-
-    pub fn get_block_num(&self) -> usize {
-        self.block_num
-    }
 }
 
 fn block_add_wm_slow(block: &[[f32; 4]; 4], shuffler: &[usize], wm_bit: bool) -> [[f32; 4]; 4] {

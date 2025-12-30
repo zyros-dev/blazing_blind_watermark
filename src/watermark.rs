@@ -9,7 +9,6 @@ use pyo3::types::PyList;
 #[pyclass]
 pub struct WaterMark {
     password_wm: u64,
-    password_img: u64,
     core: WaterMarkCore,
     wm_bit: Vec<bool>,
     img: Option<Array3<u8>>,
@@ -22,7 +21,6 @@ impl WaterMark {
     fn new(password_wm: u64, password_img: u64) -> Self {
         Self {
             password_wm,
-            password_img,
             core: WaterMarkCore::new(password_img),
             wm_bit: Vec::new(),
             img: None,
