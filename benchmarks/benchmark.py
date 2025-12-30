@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
 Benchmark comparing Python blind_watermark vs Rust blazing_blind_watermark.
-Generates box plots showing latency distributions.
+Generates box plots showing latency distributions and flame graphs.
 """
 import time
+import subprocess
+import shutil
+import tempfile
+import textwrap
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -13,6 +17,8 @@ from pathlib import Path
 ITERATIONS = 50
 WARMUP = 3
 SIZES = [(256, 256), (512, 512), (1024, 1024), (2048, 2048), (4196, 4196), (8192, 8192)]
+PROFILE_ITERATIONS = 20
+PROFILE_SIZE = (1024, 1024)
 
 
 def collect_timings(func, iterations=ITERATIONS, warmup=WARMUP):
@@ -30,6 +36,94 @@ def collect_timings(func, iterations=ITERATIONS, warmup=WARMUP):
         elapsed = (time.perf_counter() - start) * 1000  # ms
         times.append(elapsed)
     return times
+
+
+def run_profiling(out_dir: Path):
+    """Generate flame graphs using py-spy for both implementations."""
+    py_spy = shutil.which("py-spy")
+    if not py_spy:
+        print("\npy-spy not found, skipping flame graphs (pip install py-spy)")
+        return
+
+    print("\n" + "=" * 60)
+    print("Generating flame graphs...")
+    print("=" * 60)
+
+    h, w = PROFILE_SIZE
+    iterations = PROFILE_ITERATIONS
+
+    # Script for Python blind_watermark profiling
+    py_script = textwrap.dedent(f"""
+        import numpy as np
+        from blind_watermark import WaterMark
+
+        img = np.random.randint(0, 255, ({h}, {w}, 3), dtype=np.uint8)
+        wm_text = "profiling test watermark"
+
+        for _ in range({iterations}):
+            bwm = WaterMark(password_img=1, password_wm=1)
+            bwm.read_img(img=img)
+            bwm.read_wm(wm_text, mode='str')
+            embedded = bwm.embed()
+            wm_len = len(bwm.wm_bit)
+
+            bwm2 = WaterMark(password_img=1, password_wm=1)
+            bwm2.extract(embed_img=embedded, wm_shape=wm_len, mode='str')
+    """)
+
+    # Script for Rust blazing_blind_watermark profiling
+    rust_script = textwrap.dedent(f"""
+        import numpy as np
+        from blazing_blind_watermark import WaterMark
+
+        img = np.random.randint(0, 255, ({h}, {w}, 3), dtype=np.uint8)
+        wm_text = "profiling test watermark"
+
+        for _ in range({iterations}):
+            bwm = WaterMark(password_img=1, password_wm=1)
+            bwm.read_img_array(img)
+            bwm.read_wm(wm_text, mode='str')
+            embedded = bwm.embed()
+            wm_len = bwm.wm_size()
+
+            bwm2 = WaterMark(password_img=1, password_wm=1)
+            bwm2.extract(embed_img=embedded, wm_shape=wm_len, mode='str')
+    """)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+
+        # Profile Python implementation
+        py_script_path = tmpdir / "profile_python.py"
+        py_script_path.write_text(py_script)
+        py_svg = out_dir / "flamegraph_python.svg"
+
+        print(f"Profiling Python blind_watermark ({iterations} iterations @ {w}x{h})...")
+        try:
+            subprocess.run(
+                [py_spy, "record", "-o", str(py_svg), "--native", "--", "python", str(py_script_path)],
+                check=True,
+                capture_output=True,
+            )
+            print(f"  Saved: {py_svg}")
+        except subprocess.CalledProcessError as e:
+            print(f"  Failed: {e.stderr.decode() if e.stderr else e}")
+
+        # Profile Rust implementation
+        rust_script_path = tmpdir / "profile_rust.py"
+        rust_script_path.write_text(rust_script)
+        rust_svg = out_dir / "flamegraph_rust.svg"
+
+        print(f"Profiling Rust blazing_blind_watermark ({iterations} iterations @ {w}x{h})...")
+        try:
+            subprocess.run(
+                [py_spy, "record", "-o", str(rust_svg), "--native", "--", "python", str(rust_script_path)],
+                check=True,
+                capture_output=True,
+            )
+            print(f"  Saved: {rust_svg}")
+        except subprocess.CalledProcessError as e:
+            print(f"  Failed: {e.stderr.decode() if e.stderr else e}")
 
 
 def main():
@@ -150,10 +244,15 @@ def main():
     plt.suptitle("blazing_blind_watermark vs blind_watermark", fontsize=16, y=1.02)
     plt.tight_layout()
 
-    out_path = Path(__file__).parent / "benchmark_results.png"
+    out_dir = Path(__file__).parent
+    out_path = out_dir / "benchmark_results.png"
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"\nSaved plot to {out_path}")
     plt.show()
+
+    # Generate flame graphs
+    if has_python and has_rust:
+        run_profiling(out_dir)
 
 
 if __name__ == "__main__":
