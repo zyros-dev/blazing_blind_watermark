@@ -18,8 +18,8 @@ RUN pip install --upgrade pip maturin pytest numpy opencv-python blind_watermark
 # Copy source
 COPY . .
 
-# Build the Rust extension
-RUN maturin develop --release
+# Build and install the Rust extension
+RUN maturin build --release && pip install target/wheels/*.whl
 
 # Default command runs tests
 CMD ["pytest", "tests/test_compatibility.py", "-v"]

@@ -23,8 +23,10 @@ jobs:
       - name: Install dependencies
         run: pip install maturin pytest numpy opencv-python blind_watermark
 
-      - name: Build extension
-        run: maturin develop --release
+      - name: Build and install extension
+        run: |
+          maturin build --release
+          pip install target/wheels/*.whl
 
       - name: Run tests
         run: pytest tests/test_compatibility.py -v
